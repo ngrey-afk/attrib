@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Stock Metadata Preview</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 6px; vertical-align: top; }
+    img, video { max-height: 100px; }
+    input[type=text], textarea { width: 100%; }
+    textarea { height: 60px; }
+    .small { font-size: 12px; color: #444; }
+    .save-btn { margin-top: 6px; padding: 4px 8px; }
+    .download-btn { background: #4CAF50; color: white; padding: 8px 14px; text-decoration: none; border-radius: 4px; margin-right: 8px; }
+    .download-btn:hover { background: #45a049; }
+  </style>
+</head>
+<body>
+  <h2>Preview of Generated Metadata</h2>
+
+  <p>
+    <a href="/download_csv?stock=istock" class="download-btn">📥 iStock CSV</a>
+    <a href="/download_csv?stock=shutterstock" class="download-btn">📥 Shutterstock CSV</a>
+    <a href="/download_csv?stock=adobe" class="download-btn">📥 Adobe CSV</a>
+    <a href="/download_csv?stock=pond5" class="download-btn">📥 Pond5 CSV</a>
+  </p>
+
+  <form method="post" action="/batch_update">
+    <h3>Batch Update</h3>
+    <label>Files (через запятую):<br>
+      <input type="text" name="files">
+    </label><br>
+    <label>Category:<br>
+      <input type="text" name="category">
+    </label><br>
+    <label>Flags:<br>
+      <input type="checkbox" name="ai_generated"> AI-generated<br>
+      <input type="checkbox" name="fictional"> Fictional<br>
+      <input type="checkbox" name="people_not_real"> People not real<br>
+    </label><br>
+    <button type="submit" class="save-btn">Apply to selected</button>
+  </form>
+
+  <br>
+
+  <table>
+    <tr>
+      <th>Preview</th>
+      <th>Title</th>
+      <th>Description</th>
+      <th>Keywords</th>
+      <th>Category</th>
+      <th>Flags</th>
+      <th>Captions</th>
+      <th>Edit</th>
+    </tr>
+    {% for r in results %}
+    <tr>
+      <td>
+        {% if r.type == "image" %}
+          <img src="/files/{{ r.file | replace('input/', '') }}" alt="preview">
+        {% else %}
+          <video src="/files/{{ r.file | replace('input/', '') }}" controls></video>
+        {% endif %}
+      </td>
+      <td>{{ r.title }}</td>
+      <td>{{ r.description }}</td>
+      <td>{{ ", ".join(r.keywords) }}</td>
+      <td>{{ r.category or "—" }}</td>
+      <td class="small">
+        {% for k, v in r.flags.items() %}
+          <div>{{ k }}: {{ "✓" if v else "✗" }}</div>
+        {% endfor %}
+      </td>
+      <td class="small">
+        {% if r.captions %}
+          <ul>
+          {% for cap in r.captions %}
+            <li>{{ cap }}</li>
+          {% endfor %}
+          </ul>
+        {% else %}
+          —
+        {% endif %}
+      </td>
+      <td>
+        <form method="post" action="/update">
+          <input type="hidden" name="file" value="{{ r.file }}">
+          <label>Title:<br>
+            <input type="text" name="title" value="{{ r.title }}">
+          </label><br>
+          <label>Description:<br>
+            <textarea name="description">{{ r.description }}</textarea>
+          </label><br>
+          <label>Keywords:<br>
+            <textarea name="keywords">{{ ", ".join(r.keywords) }}</textarea>
+          </label><br>
+          <label>Category:<br>
+            <input type="text" name="category" value="{{ r.category or '' }}">
+          </label><br>
+          <label>Flags:<br>
+            <input type="checkbox" name="ai_generated" {% if r.flags.ai_generated %}checked{% endif %}> AI-generated<br>
+            <input type="checkbox" name="fictional" {% if r.flags.fictional %}checked{% endif %}> Fictional<br>
+            <input type="checkbox" name="people_not_real" {% if r.flags.people_not_real %}checked{% endif %}> People not real<br>
+          </label><br>
+          <button type="submit" class="save-btn">Save</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <script>
+    const ws = new WebSocket("ws://127.0.0.1:8000/ws");
+    ws.onmessage = (event) => {
+      if (event.data === "refresh") {
+        location.reload();
+      }
+    };
+  </script>
+</body>
+</html>

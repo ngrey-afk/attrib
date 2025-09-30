@@ -1,0 +1,25 @@
+# ---- Web & API ----
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+jinja2==3.1.4
+
+# ---- Data & Parsing ----
+pandas==2.2.3
+rdflib==7.0.0
+pyyaml==6.0.2
+python-multipart==0.0.9
+
+# ---- Работа с изображениями и видео ----
+pillow==10.4.0           # загрузка и обработка изображений
+opencv-python==4.10.0.84 # работа с кадрами видео
+imageio==2.35.1          # чтение/запись изображений и видео
+ffmpeg-python==0.2.0     # управление ffmpeg из Python
+
+# ---- Модели и LLM ----
+torch                  # PyTorch (Apple Silicon поддержка MPS)
+torchvision            # TorchVision
+transformers==4.44.2   # HuggingFace модели (BLIP, CLIP и др.)
+sentencepiece==0.2.0   # токенизация
+accelerate==0.34.2     # ускорение инференса HuggingFace
+safetensors==0.4.4     # безопасный формат весов
+#openai==1.45.0           # OpenAI API (если нужно)

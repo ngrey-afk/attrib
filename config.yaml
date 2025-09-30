@@ -1,0 +1,27 @@
+# ===========================
+# Настройки атрибутации
+# ===========================
+
+description:
+  max_length: 200
+  template: |
+    Create a commercial stock description in English.
+    - Start with the main subject
+    - End with background/context
+    - Avoid the words "photo", "image", "stock"
+    - Max {max_length} characters
+    Caption: {caption}
+
+keywords:
+  total: 49
+  single_words: 30
+  two_words: 19
+  stopwords: ["photo", "image", "stock", "photography", "illustration"]
+  mandatory: ["isolated", "background", "copy space"]
+
+output:
+  mode: auto        # auto = фото вшиваем, видео создаём .xmp
+  input_dir:
+    - "/Users/nataliia/Desktop/videos"
+    - "/Users/nataliia/Desktop/photos"
+  output_dir: output
