@@ -1,59 +1,64 @@
 from pathlib import Path
-from transformers import pipeline
+import subprocess
+import re
+from services.category_service import detect_category
 
-# Загружаем расширенный промпт из файла
-PROMPT_FILE = Path("prompts/prompt_en.txt")
-if PROMPT_FILE.exists():
-    PROMPT_TEMPLATE = PROMPT_FILE.read_text(encoding="utf-8").strip()
-    print(f"✅ Загружен кастомный промпт из {PROMPT_FILE}")
-else:
-    # fallback — если файла нет
-    PROMPT_TEMPLATE = (
-        "You are a bot that helps me describe images and videos for stock websites. "
-        "Create an English description (max 200 characters) and exactly 49 keywords."
+def load_prompt() -> str:
+    prompt_file = Path("prompts/prompt_en.txt")
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    return (
+        "You are a bot that helps me describe images and videos (in English) for stock websites. "
+        "Return strictly in format:\n"
+        "Title: ...\nDescription: ...\nKeywords: ...\n"
     )
-    print("⚠️ Внимание: файл prompt_en.txt не найден, используется fallback-промпт!")
 
-# Загружаем LLM для генерации
-generator = pipeline("text-generation", model="microsoft/phi-3-mini-4k-instruct")
+def run_ollama(prompt: str) -> str:
+    try:
+        result = subprocess.run(
+            ["ollama", "run", "mistral"],
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+        return result.stdout.decode("utf-8").strip()
+    except Exception as e:
+        print(f"❌ Ошибка Ollama: {e}")
+        return ""
 
+def generate_metadata_with_prompt(caption: str, file_name: str, media_type: str = "image") -> dict:
+    base_prompt = load_prompt()
 
-def generate_keywords_with_prompt(prompt: str, caption: str, **kwargs) -> dict:
-    """
-    Генерация описания и ключевых слов на основе расширенного промпта и caption от BLIP.
-    Возвращает dict: {"title": ..., "description": ..., "keywords": [...]}
-    """
-    full_prompt = f"{PROMPT_TEMPLATE}\n\nImage/Video content: {caption}\n\n{prompt.strip()}"
+    task = (
+        f"{base_prompt}\n\n"
+        f"Media type: {media_type}\n"
+        f"File name: {file_name}\n"
+        f"Caption: {caption}\n\n"
+        f"Return strictly in format:\n"
+        f"Title: <short title>\n"
+        f"Description: <200 chars>\n"
+        f"Keywords: <49 comma-separated words>\n"
+    )
 
-    print("📝 Отправляем запрос в модель...")
-    result = generator(full_prompt, max_new_tokens=400, temperature=0.7, do_sample=True)
-    text = result[0]["generated_text"]
+    output = run_ollama(task)
 
-    # Простейший парсер: описание до первой пустой строки, потом список ключей
-    parts = text.split("\n\n")
-    description = parts[0].strip() if parts else ""
-    keywords = []
-    if len(parts) > 1:
-        keywords = [
-            kw.strip().lower()
-            for kw in parts[1].replace("\n", " ").split(",")
-            if kw.strip()
-        ]
+    title, description, keywords = "", "", []
+    try:
+        title = re.search(r"Title:\s*(.+)", output, re.IGNORECASE).group(1).strip()
+        description = re.search(r"Description:\s*(.+)", output, re.IGNORECASE).group(1).strip()
+        raw_keys = re.search(r"Keywords:\s*(.+)", output, re.IGNORECASE | re.DOTALL).group(1).strip()
+        keywords = [kw.strip().lower() for kw in raw_keys.split(",") if kw.strip()]
+        # гарантируем 49 слов
+        keywords = (keywords + ["extra"] * 49)[:49]
+    except Exception as e:
+        print(f"⚠️ Ошибка парсинга: {e}")
 
-    print(f"✅ Сгенерировано описание: {description[:60]}...")
-    print(f"✅ Ключевых слов: {len(keywords)}")
+    category = detect_category(keywords)
 
     return {
-        "title": description[:80].strip().capitalize(),
-        "description": description,
-        "keywords": keywords[:49],
+        "title": title or file_name,
+        "description": description or caption,
+        "keywords": keywords,
+        "category": category,
     }
-
-
-def generate_metadata_with_prompt(prompt: str, caption: str, **kwargs) -> dict:
-    """
-    Совместимость: старое имя функции.
-    Теперь принимает любые доп. аргументы (например, file_name),
-    чтобы не падало при вызове из других сервисов.
-    """
-    return generate_keywords_with_prompt(prompt, caption, **kwargs)
