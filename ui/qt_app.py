@@ -3,12 +3,15 @@ from PyQt6 import QtWidgets, QtGui, QtCore
 import threading
 import cv2
 import faulthandler
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.tokenization_utils_base")
 
 from services.image_service import process_image
 from services.video_service import process_video
 from domain.models import MetadataEntity
 
 faulthandler.enable()
+
 
 def get_video_preview(path: Path, size=(96, 96)):
     """Достаём первый кадр видео как превью"""
@@ -34,6 +37,14 @@ class AttribApp(QtWidgets.QMainWindow):
 
         self.results: list[MetadataEntity] = []
         self.files: list[Path] = []
+
+        # очередь печати: [(row, col, text, index)]
+        self._print_queue = []
+
+        # глобальный таймер для печати
+        self._print_timer = QtCore.QTimer(self)
+        self._print_timer.timeout.connect(self._process_print_queue)
+        self._print_timer.start(20)  # скорость печати (20мс на букву)
 
         # Центральный виджет
         central = QtWidgets.QWidget()
@@ -89,7 +100,11 @@ class AttribApp(QtWidgets.QMainWindow):
     def open_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Выберите папку с медиафайлами")
         if folder:
-            self.files = [f for f in Path(folder).iterdir() if not f.name.startswith(".")]
+            allowed_ext = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+            self.files = [
+                f for f in Path(folder).iterdir()
+                if f.suffix.lower() in allowed_ext and not f.name.startswith(".")
+            ]
             self.populate_table()
 
     def populate_table(self):
@@ -133,11 +148,13 @@ class AttribApp(QtWidgets.QMainWindow):
                             )
                     if frames:
                         preview_label.setPixmap(frames[0])
+
                         def cycle_frames(label=preview_label, frames=frames):
                             current = getattr(label, "_frame_index", 0)
                             next_index = (current + 1) % len(frames)
                             label.setPixmap(frames[next_index])
                             label._frame_index = next_index
+
                         timer = QtCore.QTimer(preview_label)
                         timer.timeout.connect(cycle_frames)
                         timer.start(500)
@@ -169,7 +186,10 @@ class AttribApp(QtWidgets.QMainWindow):
         if not self.files:
             return
         self.progress.setValue(0)
-        self.progress.setMaximum(len(self.files))
+
+        steps_per_file = self.table.columnCount() - 1  # исключаем превью
+        self.progress.setMaximum(len(self.files) * steps_per_file)
+
         self.status_label.setText("Начинаем обработку...")
 
         thread = threading.Thread(target=self.process_files, daemon=True)
@@ -179,9 +199,9 @@ class AttribApp(QtWidgets.QMainWindow):
         for i, f in enumerate(self.files, start=1):
             try:
                 if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
-                    meta = process_image(f)
+                    meta = process_image(f, callback=lambda field, value, row=i-1: self.partial_update(row, field, value))
                 elif f.suffix.lower() in [".mp4", ".mov", ".avi", ".mkv"]:
-                    meta = process_video(f)
+                    meta = process_video(f, callback=lambda field, value, row=i-1: self.partial_update(row, field, value))
                 else:
                     continue
             except Exception as e:
@@ -195,7 +215,6 @@ class AttribApp(QtWidgets.QMainWindow):
                 QtCore.Q_ARG(int, i - 1), QtCore.Q_ARG(str, f.name), QtCore.Q_ARG(object, meta)
             )
 
-            self.progress.setValue(i)
             self.status_label.setText(f"Обрабатываю {i}/{len(self.files)}: {f.name}")
 
         self.status_label.setText("✅ Обработка завершена")
@@ -208,6 +227,48 @@ class AttribApp(QtWidgets.QMainWindow):
         self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(meta.category or ""))
         self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(str(meta.flags or {})))
         self.table.setItem(row, 6, QtWidgets.QTableWidgetItem("\n".join(meta.captions or [])))
+
+    @QtCore.pyqtSlot(int, str, str)
+    def update_table_cell(self, row: int, field: str, value: str):
+        """Добавляем задачу на печатание текста"""
+        col_map = {"title": 1, "description": 2, "keywords": 3,
+                   "category": 4, "flags": 5, "captions": 6}
+        if field not in col_map:
+            return
+
+        col = col_map[field]
+        item = QtWidgets.QTableWidgetItem("")
+        self.table.setItem(row, col, item)
+
+        # добавляем задачу в очередь
+        self._print_queue.append((row, col, value, 0))
+
+    def _process_print_queue(self):
+        """Глобальная печать: 1 буква за тик"""
+        if not self._print_queue:
+            return
+
+        row, col, text, index = self._print_queue[0]
+        item = self.table.item(row, col)
+        if not item:
+            item = QtWidgets.QTableWidgetItem("")
+            self.table.setItem(row, col, item)
+
+        if index < len(text):
+            item.setText(text[:index + 1])
+            self._print_queue[0] = (row, col, text, index + 1)
+        else:
+            # закончили печатать этот текст
+            self._print_queue.pop(0)
+            self.progress.setValue(self.progress.value() + 1)
+            if self.progress.value() >= self.progress.maximum():
+                self.status_label.setText("✅ Обработка завершена")
+
+    def partial_update(self, row: int, field: str, value: str):
+        QtCore.QMetaObject.invokeMethod(
+            self, "update_table_cell", QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(int, row), QtCore.Q_ARG(str, field), QtCore.Q_ARG(str, value)
+        )
 
 
 def run():
