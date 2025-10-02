@@ -8,7 +8,7 @@ from PIL import Image
 
 
 def get_video_duration(path: Path) -> float:
-    """Определяем длину видео через ffprobe (без краша на Windows)"""
+    """Определяем длину видео через ffprobe"""
     try:
         result = subprocess.run(
             [
@@ -28,7 +28,7 @@ def get_video_duration(path: Path) -> float:
 
 
 def extract_frames(path: Path, num_frames: int) -> list[Path]:
-    """Извлекаем равномерные кадры из видео (с обработкой ошибок)"""
+    """Извлекаем равномерные кадры"""
     duration = get_video_duration(path)
     if duration <= 0:
         return []
@@ -62,7 +62,7 @@ def extract_frames(path: Path, num_frames: int) -> list[Path]:
 
 
 def generate_video_captions(path: Path) -> list[str]:
-    """Генерируем список caption’ов по кадрам"""
+    """Генерация caption’ов по кадрам видео"""
     duration = get_video_duration(path)
     if duration <= 0:
         return []
@@ -79,7 +79,7 @@ def generate_video_captions(path: Path) -> list[str]:
 
 
 def build_video_description(captions: list[str], max_length: int = 200) -> str:
-    """Строим связное описание для видео из caption’ов."""
+    """Строим связное описание из caption’ов"""
     if not captions:
         return ""
 
@@ -94,74 +94,12 @@ def build_video_description(captions: list[str], max_length: int = 200) -> str:
     return description[:max_length]
 
 
-def get_video_frames(path: Path, size=(120, 120)) -> list[Image.Image]:
-    """Возвращает кадры видео как Pillow-изображения (для UI анимации)."""
-    duration = get_video_duration(path)
-    if duration <= 0:
-        return []
-
-    num_frames = 3 if duration <= 10 else 5
-    frames = extract_frames(path, num_frames)
-
-    pil_frames = []
-    for f in frames:
-        try:
-            pil_frames.append(Image.open(f).convert("RGB").resize(size))
-        except Exception as e:
-            print(f"⚠️ Ошибка открытия кадра {f}: {e}")
-
-    return pil_frames
-
-
-def build_video_gif(path: Path, size=(120, 120)) -> Path | None:
-    """Создаём GIF превью из 3 или 5 кадров"""
-    duration = get_video_duration(path)
-    if duration <= 0:
-        return None
-
-    num_frames = 3 if duration <= 10 else 5
-    frames = extract_frames(path, num_frames)
-    if not frames:
-        return None
-
-    pil_frames = []
-    for f in frames:
-        try:
-            pil_frames.append(Image.open(f).convert("RGB").resize(size))
-        except Exception as e:
-            print(f"⚠️ Ошибка открытия кадра {f}: {e}")
-
-    if not pil_frames:
-        return None
-
-    # папка cache для гифок (не исчезает)
-    cache_dir = Path("temp_gifs")
-    cache_dir.mkdir(exist_ok=True)
-
-    gif_path = cache_dir / f"{path.stem}_preview.gif"
-
-    try:
-        pil_frames[0].save(
-            gif_path,
-            save_all=True,
-            append_images=pil_frames[1:],
-            duration=400,
-            loop=0,
-            optimize=True
-        )
-        return gif_path if gif_path.exists() and gif_path.stat().st_size > 0 else None
-    except Exception as e:
-        print(f"❌ Ошибка сохранения GIF {path}: {e}")
-        return None
-
-
 def process_video(path: Path) -> MetadataEntity:
     """
     Полная обработка видео:
-    - Извлекаем кадры
-    - Генерируем captions
-    - Строим описание
-    - Прогоняем через LLM для нормализации (prompt_en.txt)
+    1. BLIP → captions
+    2. Собираем draft description
+    3. Ollama → Title, Description, Keywords, Category
     """
     try:
         captions = generate_video_captions(path)
@@ -179,7 +117,7 @@ def process_video(path: Path) -> MetadataEntity:
             description=llm_result.get("description", description),
             keywords=llm_result.get("keywords", []),
             disambiguations={},
-            category=None,
+            category=llm_result.get("category"),
             secondary_category=None,
             flags={},
             captions=captions
