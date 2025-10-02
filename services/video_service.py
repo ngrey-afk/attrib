@@ -8,6 +8,7 @@ from services.category_service import detect_category
 CACHE_DIR = Path(".cache/frames")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def get_video_duration(path: Path) -> float:
     try:
         result = subprocess.run(
@@ -25,6 +26,7 @@ def get_video_duration(path: Path) -> float:
         return float(result.stdout.strip())
     except Exception:
         return 0.0
+
 
 def extract_frames(path: Path, num_frames: int = 3) -> list[Path]:
     duration = get_video_duration(path)
@@ -54,19 +56,36 @@ def extract_frames(path: Path, num_frames: int = 3) -> list[Path]:
             print(f"⚠️ Ошибка при извлечении кадра {idx}: {e}")
     return frame_paths
 
-def process_video(path: Path) -> MetadataEntity:
+
+def process_video(path: Path, callback=None) -> MetadataEntity:
+    """Обработка видео: извлекаем кадр → caption → metadata → category/flags"""
     try:
         frames = extract_frames(path, num_frames=1)
         caption = generate_caption(str(frames[0])) if frames else ""
-        enriched = generate_metadata_with_prompt(caption, media_type="video")
+        if callback and caption:
+            callback("captions", caption)
+
+        enriched = generate_metadata_with_prompt(
+            caption,
+            media_type="video",
+            callback=callback
+        )
+
+        category = detect_category(enriched.get("keywords", []))
+        if callback and category:
+            callback("category", category)
+
+        flags = {"video": True}
+        if callback:
+            callback("flags", str(flags))
 
         return MetadataEntity(
             file=str(path),
             title=enriched.get("title"),
             description=enriched.get("description"),
             keywords=enriched.get("keywords"),
-            category=detect_category(enriched.get("keywords", [])),
-            flags={"video": True},
+            category=category,
+            flags=flags,
             captions=[caption] if caption else [],
             disambiguations=[]
         )
