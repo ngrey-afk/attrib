@@ -1,64 +1,81 @@
-import subprocess
 import json
-from pathlib import Path
-from domain.models import MetadataEntity
+import subprocess
+import re
 from services.prompt_service import load_prompt
 
-
-def generate_metadata_with_prompt(caption: str, file_name: str, media_type: str) -> dict:
-    """
-    Отправляем caption + расширенный промпт в Ollama.
-    Возвращает JSON с title, description, keywords.
-    """
-    prompt_text = load_prompt()
-
-    # Финальный запрос
-    task = f"""{prompt_text}
-
-File: {file_name}
-Type: {media_type}
-Caption: {caption}
-
-Return valid JSON with keys: "title", "description", "keywords".
-"""
-
+def call_ollama(model: str, prompt: str) -> str:
+    """Вызов Ollama"""
     try:
         result = subprocess.run(
-            ["ollama", "run", "mistral"],
-            input=task.encode("utf-8"),
-            capture_output=True,
+            ["ollama", "run", model],
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=True
         )
-        output = result.stdout.decode("utf-8").strip()
+        return result.stdout.decode("utf-8").strip()
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Ollama error: {e.stderr.decode('utf-8')}")
+        return ""
 
-        # Пытаемся достать JSON
-        start = output.find("{")
-        end = output.rfind("}") + 1
-        if start != -1 and end != -1:
-            parsed = json.loads(output[start:end])
+def extract_json_block(text: str) -> str:
+    """Ищем JSON-блок {...} даже если вокруг мусор"""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return match.group(0)
+    return "{}"
 
-            # ⚡ Проверяем и подчищаем
-            title = parsed.get("title", caption[:80].capitalize())
-            description = parsed.get("description", caption)
-            keywords = parsed.get("keywords", [])
+def ensure_extended_title(description: str, current_title: str) -> str:
+    """Просим Ollama переписать description как расширенный title, если title слишком короткий"""
+    if len(current_title.split()) >= 7:
+        return current_title
+    prompt = f"Rewrite the following description as an alternative extended title (7–12 words, synonyms, different word order, no repetition):\n\n{description}"
+    raw = call_ollama("llama3", prompt)
+    return raw.strip().split("\n")[0] if raw else current_title
 
-            # Случай, если Ollama выдала ключи с запятыми внутри строки
-            if isinstance(keywords, str):
-                keywords = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+def expand_keywords(keywords: list[str]) -> list[str]:
+    """Гарантируем 49 ключевых слов"""
+    unique = list(dict.fromkeys([k.lower().strip() for k in keywords if k.strip()]))
+    if len(unique) >= 49:
+        return unique[:49]
 
-            # Ограничение до 49, без повторов
-            keywords = list(dict.fromkeys(keywords))[:49]
+    prompt = f"Expand the following keywords into exactly 49 unique, lowercase, comma-separated words for stock photo search:\n\n{', '.join(unique)}"
+    raw = call_ollama("llama3", prompt)
 
-            return {
-                "title": title,
-                "description": description,
-                "keywords": keywords
-            }
+    new_keywords = []
+    if raw:
+        if "{" in raw and "}" in raw:  # вдруг JSON
+            try:
+                data = json.loads(extract_json_block(raw))
+                new_keywords = data.get("keywords", [])
+            except Exception:
+                pass
+        if not new_keywords:
+            new_keywords = [w.strip() for w in raw.split(",") if w.strip()]
 
-        else:
-            print(f"⚠️ Не удалось извлечь JSON, ответ: {output}")
-            return {"title": caption[:80], "description": caption, "keywords": []}
+    full_list = list(dict.fromkeys(unique + new_keywords))
+    return full_list[:49] if len(full_list) >= 49 else (full_list + ["stock"] * (49 - len(full_list)))
 
-    except Exception as e:
-        print(f"❌ Ошибка генерации атрибуции: {e}")
-        return {"title": caption[:80], "description": caption, "keywords": []}
+def generate_metadata_with_prompt(caption: str, media_type: str = "image") -> dict:
+    """Запрос в Ollama + доработка Title/Keywords"""
+    prompt_template = load_prompt()
+    full_prompt = f"{prompt_template}\n\nCaption: {caption}\nType: {media_type}"
+    raw = call_ollama("llama3", full_prompt)
+
+    json_text = extract_json_block(raw)
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        print("⚠️ Ошибка парсинга Ollama")
+        return {"title": "", "description": "", "keywords": []}
+
+    desc = data.get("description", "")
+    title = ensure_extended_title(desc, data.get("title", ""))
+    keywords = expand_keywords(data.get("keywords", []))
+
+    return {
+        "title": title,
+        "description": desc,
+        "keywords": keywords,
+        "category": data.get("category", "")
+    }
