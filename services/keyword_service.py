@@ -1,7 +1,6 @@
-import json
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+from services.description_service import enrich_description_with_holidays, enrich_keywords_with_holidays
 
 
 def call_ollama(model: str, prompt: str) -> str:
@@ -22,12 +21,12 @@ def call_ollama(model: str, prompt: str) -> str:
 def generate_title(caption: str, media_type: str) -> str:
     prompt = (
         f"You are generating an English title for photo/video metadata. "
-        f"Rephrase this caption into a clean extended  of 7–12 words: {caption}. "
+        f"Rephrase this caption into a clean extended title of 7–12 words: {caption}. "
         f"Do not copy the caption word-for-word. "
         f"Make it natural, professional, and relevant for commercial usage. "
         f"Output must be only the title, no comments, no explanations."
     )
-    raw = call_ollama("llama3", prompt)
+    raw = call_ollama("gemma2:2b", prompt)
     return raw.split("\n")[0].strip('" ') if raw else caption
 
 
@@ -46,7 +45,7 @@ def generate_description(caption: str, media_type: str) -> str:
         f"Remove articles 'a', 'the'. "
         f"Max 200 characters."
     )
-    raw = call_ollama("llama3", prompt)
+    raw = call_ollama("gemma2:2b", prompt)
     if not raw:
         return caption
 
@@ -55,89 +54,100 @@ def generate_description(caption: str, media_type: str) -> str:
     return desc
 
 
-
-
 def generate_keywords(caption: str, media_type: str) -> list[str]:
-    prompt = (
-        f"Generate exactly 49 unique, lowercase, comma-separated single words in English. "
-        f"Base with this exact caption: \"{caption}\". "
-        f"No numbering, no explanations. "
-        f"First 10 must describe main objects, actions, background, holidays or businesses. "
-        f"Include synonyms. "
-        f"Do not use words like 'photo', 'photography', 'image', 'stock'. "
-        f"Each word only once. "
-        f"Caption: {caption}\nType: {media_type}"
+    stopwords = {
+        "a","the","and","with","on","in","of","to","for","by","at","is","are",
+        "was","were","this","that","these","those","it","its","an","as","one",
+        "here","there","them","those","someone","some","any"
+    }
+
+    # --- 1. базовые объекты ---
+    words = re.findall(r"\b[a-zA-Z]+\b", caption.lower())
+    objects = [w for w in words if w not in stopwords and len(w) > 2]
+    base_words = list(dict.fromkeys(objects))[:10]
+
+    # --- 2. темы ---
+    prompt_themes = (
+        f"Extract 3–5 high-level thematic categories for these objects: {', '.join(base_words)}. "
+        f"Examples: animal, medical, technology, travel, business. "
+        f"Output only lowercase, comma-separated words. No explanations."
     )
-    raw = call_ollama("llama3", prompt)
-    if not raw:
-        return []
+    raw_themes = call_ollama("gemma2:2b", prompt_themes)
+    themes = [w.strip().lower() for w in raw_themes.split(",") if w.strip()] if raw_themes else []
 
-    keywords = [w.strip() for w in raw.split(",") if w.strip()]
+    # --- 3. синонимы ---
+    prompt_synonyms = (
+        f"Generate synonyms or closely related words for these objects: {', '.join(base_words)}. "
+        f"Only lowercase, comma-separated single words. No sentences."
+    )
+    raw_syn = call_ollama("gemma2:2b", prompt_synonyms)
+    synonyms = [w.strip().lower() for w in raw_syn.split(",") if w.strip()] if raw_syn else []
+
+    # --- 4. бизнес-контекст ---
+    prompt_business = (
+        f"List 5–8 relevant industries, businesses, or commercial contexts for these objects: {', '.join(base_words)}. "
+        f"Examples: veterinary, pet care, healthcare, education, IT, marketing. "
+        f"Output lowercase, comma-separated, max 2 words each. No explanations."
+    )
+    raw_business = call_ollama("gemma2:2b", prompt_business)
+    business_words = [w.strip().lower() for w in raw_business.split(",") if w.strip()] if raw_business else []
+
+    # --- 5. объединяем ---
+    keywords = base_words + themes + synonyms + business_words
+
+    # --- 6. фильтрация ---
+    banned = {"photo", "image", "stock", "photography", "here", "words", "generated"}
+    keywords = [w for w in keywords if w not in banned and len(w) > 2]
+    keywords = list(dict.fromkeys(keywords))  # уникальные
+
+    # --- 7. добивка до 49 ---
     if len(keywords) < 49:
-        missing = 49 - len(keywords)
-        prompt2 = (
-            f"Generate {missing} additional unique synonyms or closely related words. "
-            f"Only output lowercase, comma-separated words, no comments. "
-            f"Base set: {', '.join(keywords)}"
+        prompt_fill = (
+            f"Generate {49 - len(keywords)} additional unique related words to these: {', '.join(keywords)}. "
+            f"Lowercase, comma-separated, no sentences, no explanations."
         )
-        raw2 = call_ollama("llama3", prompt2)
-        extra = [w.strip().lower() for w in raw2.split(",") if w.strip()]
-        keywords = list(dict.fromkeys(keywords + extra))
+        raw_fill = call_ollama("gemma2:2b", prompt_fill)
+        extra = [w.strip().lower() for w in raw_fill.split(",") if w.strip()]
+        keywords.extend(extra)
 
-    return keywords[:49]
+    keywords = list(dict.fromkeys(keywords))[:49]
+    return keywords
 
 
 def generate_metadata_with_prompt(caption: str, media_type: str = "image", callback=None) -> dict:
-    """
-    Генерация метаданных (title, description, keywords).
-    Callback вызывается по мере готовности каждого поля.
-    Работает асинхронно, без join(), чтобы не блокировать UI.
-    """
-    results = {"title": "", "description": "", "keywords": []}
-    lock = threading.Lock()
+    """Генерация метаданных (title, description, keywords) построчно с анимацией."""
+    results = {}
 
-    def run_title():
-        try:
-            title = generate_title(caption, media_type)
-            with lock:
-                results["title"] = title
-            print(f"📝 Title generated: {title}")
-            if callback and title:
-                callback("title", title)
-        except Exception as e:
-            print(f"❌ Ошибка в generate_title: {e}")
+    try:
+        # 1. Title
+        title = generate_title(caption, media_type)
+        if callback and title:
+            callback("title", title)
+        results["title"] = title
 
-    def run_description():
-        try:
-            desc = generate_description(caption, media_type)
-            with lock:
-                results["description"] = desc
-            print(f"📝 Description generated: {desc}")
-            if callback and desc:
-                callback("description", desc)
-        except Exception as e:
-            print(f"❌ Ошибка в generate_description: {e}")
+        # 2. Description
+        desc = generate_description(caption, media_type)
+        themes = [t.strip().lower() for t in desc.split(",") if t.strip()]
+        desc = enrich_description_with_holidays(desc, themes)
+        if callback and desc:
+            callback("description", desc)
+        results["description"] = desc
 
-    def run_keywords():
-        try:
-            keywords = generate_keywords(caption, media_type)
-            with lock:
-                results["keywords"] = keywords
-            print(f"📝 Keywords count: {len(keywords)}")
-            if callback and keywords:
-                callback("keywords", ", ".join(keywords))
-                # вычисляем категорию сразу после появления ключевых слов
-                from services.category_service import detect_category
-                category = detect_category(keywords)
-                if callback and category:
-                    callback("category", category)
-        except Exception as e:
-            print(f"❌ Ошибка в generate_keywords: {e}")
+        # 3. Keywords
+        keywords = generate_keywords(caption, media_type)
+        keywords = enrich_keywords_with_holidays(keywords, themes)
+        if callback and keywords:
+            callback("keywords", ", ".join(keywords))
+        results["keywords"] = keywords
 
-    # Запускаем три параллельных потока
-    threading.Thread(target=run_title, daemon=True).start()
-    threading.Thread(target=run_description, daemon=True).start()
-    threading.Thread(target=run_keywords, daemon=True).start()
+        # 4. Category (сразу после keywords)
+        from services.category_service import detect_category
+        category = detect_category(keywords)
+        if callback and category:
+            callback("category", category)
+        results["category"] = category
 
-    # Возвращаем сразу (пустой/частичный результат), UI обновится через callback
+    except Exception as e:
+        print(f"❌ Ошибка в generate_metadata_with_prompt: {e}")
+
     return results
