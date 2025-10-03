@@ -31,27 +31,33 @@ def generate_title(caption: str, media_type: str) -> str:
 
 
 def generate_description(caption: str, media_type: str) -> str:
+    original_caption = caption.strip()
+
     prompt = (
-        f"You are generating an English description for photo/video metadata. "
-        f"Start exactly with this caption, unchanged: {caption}. "
-        f"After it, continue in a short list style: 3–5 key themes separated by commas. "
-        f"Focus on subject, setting, and commercial use (e.g. pet care, veterinarian, medical). "
-        f"Optionally add 1–2 real international or thematic observances (e.g. World Dog Day, International Friendship Day), "
-        f"only if they clearly match the caption. "
-        f"Do not use generic words like 'holiday' or 'festival'. "
-        f"Do not add filler text, do not write full sentences, no introductions, no quotes. "
-        f"Forbidden: 'concept for', 'ideal for', 'perfect for', 'showcasing'. "
-        f"Output must be only the description, no comments, no explanations. "
-        f"Remove articles 'a', 'the'. "
-        f"Max 200 characters."
+        f"You are generating a DESCRIPTION for stock photo/video metadata.\n"
+        f"Caption (repeat exactly, do not change or rephrase): {original_caption}\n\n"
+        f"RULES:\n"
+        f"- Start with the caption EXACTLY as written.\n"
+        f"- After the caption, add a comma, then continue with 3–5 THEMES.\n"
+        f"- THEMES must be short semantic/commercial phrases (2–3 words).\n"
+        f"- Optionally add 1–2 real international or thematic observances if clearly relevant.\n"
+        f"- Output must be ONE single line: caption + themes + observances.\n"
+        f"- No filler words, no explanations, no 'caption' markers.\n"
+        f"- Only commas and periods as punctuation.\n"
+        f"- Max 200 characters.\n"
     )
+
     raw = call_ollama("gemma2:2b", prompt)
     if not raw:
-        return caption
+        return original_caption
 
+    desc = raw.strip('" ').replace("\n", " ").replace(" a ", " ").replace(" the ", " ").replace("The ", "").replace("A ", "")
+    desc = desc.encode("ascii", "ignore").decode("ascii")  # чистим эмодзи и нелатиницу
     # чистим кавычки и артикли
-    desc = raw.strip('" ').replace(" a ", " ").replace(" the ", " ").replace("The ", "").replace("A ", "")
+
     return desc
+
+
 
 
 def generate_keywords(caption: str, media_type: str) -> list[str]:

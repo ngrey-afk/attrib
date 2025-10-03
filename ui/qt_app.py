@@ -38,13 +38,15 @@ class AttribApp(QtWidgets.QMainWindow):
         self.results: list[MetadataEntity] = []
         self.files: list[Path] = []
 
-        # очередь печати: [(row, col, text, index)]
-        self._print_queue = []
+        # веса колонок
+        self._col_weights = [1, 1, 1, 2, 0.5, 0.5, 1]
 
-        # глобальный таймер для печати
+        # очередь печати и таймер
+        self._print_queue = []
+        self._pending_tasks = {}
         self._print_timer = QtCore.QTimer(self)
         self._print_timer.timeout.connect(self._process_print_queue)
-        self._print_timer.start(20)  # скорость печати (20мс на букву)
+        self._print_timer.start(30)
 
         # Центральный виджет
         central = QtWidgets.QWidget()
@@ -59,9 +61,11 @@ class AttribApp(QtWidgets.QMainWindow):
             "Category", "Flags", "Captions"
         ])
         self.table.setIconSize(QtCore.QSize(96, 96))
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setMinimumSectionSize(140)
+
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
         layout.addWidget(self.table)
 
         # Прогресс и статус
@@ -95,7 +99,29 @@ class AttribApp(QtWidgets.QMainWindow):
         self.export_btn.setFixedWidth(150)
         bottom_layout.addWidget(self.export_btn)
 
+        self.animate_checkbox = QtWidgets.QCheckBox("Печатать")
+        self.animate_checkbox.setChecked(False)
+        bottom_layout.addWidget(self.animate_checkbox)
+
         bottom_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # 👉 пересчёт ширины сразу после первого показа
+        QtCore.QTimer.singleShot(0, self.adjust_column_widths)
+
+    def adjust_column_widths(self):
+        """Пересчёт ширины колонок по весам"""
+        total_width = self.table.viewport().width()
+        total_weight = sum(self._col_weights)
+        header = self.table.horizontalHeader()
+        for i, w in enumerate(self._col_weights):
+            width = int(total_width * w / total_weight)
+            header.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(i, width)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.adjust_column_widths()
+
 
     def open_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Выберите папку с медиафайлами")
@@ -221,30 +247,42 @@ class AttribApp(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(int, str, object)
     def update_table_row(self, row: int, filename: str, meta: MetadataEntity):
-        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(meta.title or ""))
-        self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(meta.description or ""))
-        self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(", ".join(meta.keywords or [])))
-        self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(meta.category or ""))
-        self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(str(meta.flags or {})))
-        self.table.setItem(row, 6, QtWidgets.QTableWidgetItem("\n".join(meta.captions or [])))
+        # captions показываем сразу (без анимации) – синхронно
+        if meta.captions:
+            self.table.setItem(row, 6, QtWidgets.QTableWidgetItem("\n".join(meta.captions)))
+        else:
+            self.table.setItem(row, 6, QtWidgets.QTableWidgetItem(""))
+
+        # остальные поля – создаём только если пустые (чтобы не затирать очередь печати)
+        for col in range(1, 6):
+            if not self.table.item(row, col):
+                self.table.setItem(row, col, QtWidgets.QTableWidgetItem(""))
 
     @QtCore.pyqtSlot(int, str, str)
     def update_table_cell(self, row: int, field: str, value: str):
-        """Добавляем задачу на печатание текста"""
         col_map = {"title": 1, "description": 2, "keywords": 3,
-                   "category": 4, "flags": 5, "captions": 6}
+                   "category": 4, "flags": 5}
         if field not in col_map:
             return
 
         col = col_map[field]
-        item = QtWidgets.QTableWidgetItem("")
-        self.table.setItem(row, col, item)
+        if row not in self._pending_tasks:
+            self._pending_tasks[row] = []
+        self._pending_tasks[row].append((col, value))
 
-        # добавляем задачу в очередь
-        self._print_queue.append((row, col, value, 0))
+        if not self._print_queue:
+            self._start_next_task(row)
+
+    def _start_next_task(self, row: int) -> bool:
+        if row in self._pending_tasks and self._pending_tasks[row]:
+            col, value = self._pending_tasks[row].pop(0)
+            item = self.table.item(row, col) or QtWidgets.QTableWidgetItem("")
+            self.table.setItem(row, col, item)
+            self._print_queue.append((row, col, value, 0))
+            return True
+        return False
 
     def _process_print_queue(self):
-        """Глобальная печать: 1 буква за тик"""
         if not self._print_queue:
             return
 
@@ -254,15 +292,26 @@ class AttribApp(QtWidgets.QMainWindow):
             item = QtWidgets.QTableWidgetItem("")
             self.table.setItem(row, col, item)
 
-        if index < len(text):
-            item.setText(text[:index + 1])
-            self._print_queue[0] = (row, col, text, index + 1)
+        if self.animate_checkbox.isChecked():
+            if index < len(text):
+                item.setText(text[:index + 1])
+                self._print_queue[0] = (row, col, text, index + 1)
+                return
         else:
-            # закончили печатать этот текст
-            self._print_queue.pop(0)
-            self.progress.setValue(self.progress.value() + 1)
-            if self.progress.value() >= self.progress.maximum():
-                self.status_label.setText("✅ Обработка завершена")
+            # фикс: сразу выставляем весь текст
+            item.setText(text)
+
+        # завершение задачи
+        self._print_queue.pop(0)
+        self.progress.setValue(self.progress.value() + 1)
+        if self.progress.value() >= self.progress.maximum():
+            self.status_label.setText("✅ Обработка завершена")
+
+        if not self._start_next_task(row):
+            for other_row, tasks in self._pending_tasks.items():
+                if tasks:
+                    self._start_next_task(other_row)
+                    break
 
     def partial_update(self, row: int, field: str, value: str):
         QtCore.QMetaObject.invokeMethod(
