@@ -1,137 +1,94 @@
 from pathlib import Path
 import subprocess
-import tempfile
 from domain.models import MetadataEntity
 from services.caption_service import generate_caption
 from services.keyword_service import generate_metadata_with_prompt
-from PIL import Image
+from services.category_service import detect_category
+
+CACHE_DIR = Path(".cache/frames")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_video_duration(path: Path) -> float:
-    """Определяем длину видео через ffprobe"""
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
-                str(path.resolve())
+                str(path)
             ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
+            text=True,
             check=True
         )
-        return float(result.stdout.decode().strip())
-    except Exception as e:
-        print(f"❌ Ошибка при получении длительности видео {path}: {e}")
+        return float(result.stdout.strip())
+    except Exception:
         return 0.0
 
 
-def extract_frames(path: Path, num_frames: int) -> list[Path]:
-    """Извлекаем равномерные кадры"""
+def extract_frames(path: Path, num_frames: int = 3) -> list[Path]:
     duration = get_video_duration(path)
     if duration <= 0:
         return []
-
-    step = duration / (num_frames + 1)
-    temp_dir = Path(tempfile.mkdtemp())
+    timestamps = [duration * i / (num_frames + 1) for i in range(1, num_frames + 1)]
     frame_paths = []
-
-    for i in range(1, num_frames + 1):
-        timestamp = i * step
-        frame_path = temp_dir / f"frame_{i}.jpg"
+    for idx, ts in enumerate(timestamps, start=1):
+        frame_file = CACHE_DIR / f"{path.stem}_frame_{idx}.jpg"
         try:
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-ss", str(timestamp),
-                    "-i", str(path.resolve()),
+                    "-ss", str(ts),
+                    "-i", str(path),
                     "-frames:v", "1",
                     "-q:v", "2",
-                    str(frame_path)
+                    str(frame_file)
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 check=True
             )
-            frame_paths.append(frame_path)
+            if frame_file.exists():
+                frame_paths.append(frame_file)
         except Exception as e:
-            print(f"⚠️ Ошибка извлечения кадра {i} из {path}: {e}")
-
+            print(f"⚠️ Ошибка при извлечении кадра {idx}: {e}")
     return frame_paths
 
 
-def generate_video_captions(path: Path) -> list[str]:
-    """Генерация caption’ов по кадрам видео"""
-    duration = get_video_duration(path)
-    if duration <= 0:
-        return []
-
-    num_frames = 3 if duration <= 10 else 5
-    frames = extract_frames(path, num_frames)
-    captions = []
-    for f in frames:
-        try:
-            captions.append(generate_caption(str(f)))
-        except Exception as e:
-            print(f"⚠️ Ошибка генерации caption для кадра {f}: {e}")
-    return captions
-
-
-def build_video_description(captions: list[str], max_length: int = 200) -> str:
-    """Строим связное описание из caption’ов"""
-    if not captions:
-        return ""
-
-    parts = []
-    for i, cap in enumerate(captions):
-        if i == 0:
-            parts.append(f"A video showing {cap}")
-        else:
-            parts.append(f"then {cap}")
-
-    description = ", ".join(parts)
-    return description[:max_length]
-
-
-def process_video(path: Path) -> MetadataEntity:
-    """
-    Полная обработка видео:
-    1. BLIP → captions
-    2. Собираем draft description
-    3. Ollama → Title, Description, Keywords, Category
-    """
+def process_video(path: Path, callback=None) -> MetadataEntity:
+    """Обработка видео: извлекаем кадр → caption → metadata → category/flags"""
     try:
-        captions = generate_video_captions(path)
-        description = build_video_description(captions)
+        frames = extract_frames(path, num_frames=1)
+        caption = generate_caption(str(frames[0])) if frames else ""
+        if callback and caption:
+            callback("captions", caption)
 
-        llm_result = generate_metadata_with_prompt(
-            caption=description,
-            file_name=path.name,
-            media_type="video"
+        enriched = generate_metadata_with_prompt(
+            caption,
+            media_type="video",
+            callback=callback
         )
 
+        category = detect_category(enriched.get("keywords", []))
+        if callback and category:
+            callback("category", category)
+
+        flags = {"video": True}
+        if callback:
+            callback("flags", str(flags))
+
         return MetadataEntity(
-            file=str(path.resolve()),
-            title=llm_result.get("title", path.stem),
-            description=llm_result.get("description", description),
-            keywords=llm_result.get("keywords", []),
-            disambiguations={},
-            category=llm_result.get("category"),
-            secondary_category=None,
-            flags={},
-            captions=captions
+            file=str(path),
+            title=enriched.get("title"),
+            description=enriched.get("description"),
+            keywords=enriched.get("keywords"),
+            category=category,
+            flags=flags,
+            captions=[caption] if caption else [],
+            disambiguations=[]
         )
     except Exception as e:
-        print(f"❌ Ошибка обработки видео {path}: {e}")
-        return MetadataEntity(
-            file=str(path.resolve()),
-            title=path.stem,
-            description="",
-            keywords=[],
-            disambiguations={},
-            category=None,
-            secondary_category=None,
-            flags={},
-            captions=[]
-        )
+        print(f"❌ Ошибка при обработке видео {path}: {e}")
+        return MetadataEntity(file=str(path), title="", description="", keywords=[], disambiguations=[])

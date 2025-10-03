@@ -59,7 +59,9 @@ def generate_description(caption: str, media_type: str) -> str:
     return desc
 
 
-def generate_keywords(caption: str, media_type: str, description: str = "") -> list[str]:
+
+
+def generate_keywords(caption: str, media_type: str) -> list[str]:
     stopwords = {
         "a","the","and","with","on","in","of","to","for","by","at","is","are",
         "was","were","this","that","these","those","it","its","an","as","one",
@@ -71,67 +73,41 @@ def generate_keywords(caption: str, media_type: str, description: str = "") -> l
     objects = [w for w in words if w not in stopwords and len(w) > 2]
     base_words = list(dict.fromkeys(objects))[:10]
 
-    # --- 2. приоритетные синонимы ---
-    expanded_objects = []
-    for obj in base_words:
-        expanded_objects.append(obj)
-        if obj in priority_synonyms:
-            expanded_objects.extend(priority_synonyms[obj])
-        if obj in manual_expansions:
-            expanded_objects.extend(manual_expansions[obj])
-
-    # --- 3. AI-сгенерированные синонимы ---
-    prompt_synonyms = (
-        f"Generate synonyms or very close variations for these objects: {', '.join(base_words)}. "
-        f"Focus on direct names, plural forms, related nouns (e.g. dog, dogs, puppy, puppies, canine). "
-        f"Output lowercase, comma-separated single words, no sentences."
-    )
-    raw_syn = call_ollama("gemma2:2b", prompt_synonyms)
-    synonyms = [w.strip().lower() for w in raw_syn.split(",") if w.strip()] if raw_syn else []
-
-    # --- 4. категории ---
+    # --- 2. темы ---
     prompt_themes = (
-        f"Extract 5–8 broader categories related to these objects: {', '.join(base_words)}. "
-        f"Examples: animals, pets, christmas, decorations, travel, technology. "
-        f"Output only lowercase, comma-separated single words. No explanations."
+        f"Extract 3–5 high-level thematic categories for these objects: {', '.join(base_words)}. "
+        f"Examples: animal, medical, technology, travel, business. "
+        f"Output only lowercase, comma-separated words. No explanations."
     )
     raw_themes = call_ollama("gemma2:2b", prompt_themes)
     themes = [w.strip().lower() for w in raw_themes.split(",") if w.strip()] if raw_themes else []
 
-    # --- 5. тематические фразы из описания ---
-    desc_phrases = []
-    if description:
-        prompt_desc = (
-            f"From this description, extract 5–8 short commercial THEMES (2–3 words): {description}. "
-            f"Examples: animal care, veterinary clinic, best friend, holiday celebration. "
-            f"Output lowercase, comma-separated, 2–3 words each."
-        )
-        raw_desc = call_ollama("gemma2:2b", prompt_desc)
-        desc_phrases = [w.strip().lower() for w in raw_desc.split(",") if w.strip()] if raw_desc else []
+    # --- 3. синонимы ---
+    prompt_synonyms = (
+        f"Generate synonyms or closely related words for these objects: {', '.join(base_words)}. "
+        f"Only lowercase, comma-separated single words. No sentences."
+    )
+    raw_syn = call_ollama("gemma2:2b", prompt_synonyms)
+    synonyms = [w.strip().lower() for w in raw_syn.split(",") if w.strip()] if raw_syn else []
 
-    # --- 6. бизнес-контекст и праздники ---
+    # --- 4. бизнес-контекст ---
     prompt_business = (
-        f"List 5–8 relevant industries, businesses, or observances for these objects: {', '.join(base_words)}. "
-        f"Examples: veterinary, pet care, healthcare, education, christmas, world dog day. "
+        f"List 5–8 relevant industries, businesses, or commercial contexts for these objects: {', '.join(base_words)}. "
+        f"Examples: veterinary, pet care, healthcare, education, IT, marketing. "
         f"Output lowercase, comma-separated, max 2 words each. No explanations."
     )
     raw_business = call_ollama("gemma2:2b", prompt_business)
     business_words = [w.strip().lower() for w in raw_business.split(",") if w.strip()] if raw_business else []
 
-    # --- 7. собираем блоки ---
-    keywords = []
-    keywords += expanded_objects                # главный объект + ручные синонимы
-    keywords += synonyms                        # AI-сгенерированные синонимы
-    keywords += themes                          # общие категории
-    keywords += desc_phrases                    # темы из описания
-    keywords += business_words                  # бизнес, праздники
+    # --- 5. объединяем ---
+    keywords = base_words + themes + synonyms + business_words
 
-    # --- 8. фильтрация ---
+    # --- 6. фильтрация ---
     banned = {"photo", "image", "stock", "photography", "here", "words", "generated"}
     keywords = [w for w in keywords if w not in banned and len(w) > 2]
-    keywords = list(dict.fromkeys(keywords))  # уникальные, сохраняя порядок
+    keywords = list(dict.fromkeys(keywords))  # уникальные
 
-    # --- 9. добивка до 49 ---
+    # --- 7. добивка до 49 ---
     if len(keywords) < 49:
         prompt_fill = (
             f"Generate {49 - len(keywords)} additional unique related words to these: {', '.join(keywords)}. "
@@ -141,14 +117,8 @@ def generate_keywords(caption: str, media_type: str, description: str = "") -> l
         extra = [w.strip().lower() for w in raw_fill.split(",") if w.strip()]
         keywords.extend(extra)
 
-    # --- 10. форматирование ---
-    single_words = [w for w in keywords if " " not in w][:30]
-    phrases = [w for w in keywords if " " in w][:19]
-    final_keywords = (single_words + phrases)[:49]
-
-    return final_keywords
-
-
+    keywords = list(dict.fromkeys(keywords))[:49]
+    return keywords
 
 
 def generate_metadata_with_prompt(caption: str, media_type: str = "image", callback=None) -> dict:
