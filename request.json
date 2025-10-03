@@ -1,0 +1,5 @@
+{
+  "model": "llama3.2-vision",
+  "prompt": "Describe this image in detail, including objects, actions and context",
+  "images": ["D:\\dev\\attrib\\input\\vet00011.jpeg"]
+}
