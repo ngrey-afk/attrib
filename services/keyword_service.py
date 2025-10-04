@@ -2,6 +2,7 @@ import subprocess
 import re
 from services.priority_synonyms import priority_synonyms
 from services.description_service import enrich_description_with_holidays, enrich_keywords_with_holidays
+import difflib
 
 
 def call_ollama(model: str, prompt: str) -> str:
@@ -59,66 +60,57 @@ def generate_description(caption: str, media_type: str) -> str:
     return desc
 
 
+def generate_keywords(caption: str, media_type: str, description: str = "") -> list[str]:
+    """Генерация 49 релевантных ключей с приоритетом по смыслу (просто и стабильно)."""
 
-
-def generate_keywords(caption: str, media_type: str) -> list[str]:
-    stopwords = {
-        "a","the","and","with","on","in","of","to","for","by","at","is","are",
-        "was","were","this","that","these","those","it","its","an","as","one",
-        "here","there","them","those","someone","some","any"
-    }
-
-    # --- 1. базовые объекты ---
+    # --- 1. Базовые слова из кэпшона ---
     words = re.findall(r"\b[a-zA-Z]+\b", caption.lower())
-    objects = [w for w in words if w not in stopwords and len(w) > 2]
-    base_words = list(dict.fromkeys(objects))[:10]
+    base_words = [w for w in words if len(w) > 2][:10]
 
-    # --- 2. темы ---
-    prompt_themes = (
-        f"Extract 3–5 high-level thematic categories for these objects: {', '.join(base_words)}. "
-        f"Examples: animal, medical, technology, travel, business. "
-        f"Output only lowercase, comma-separated words. No explanations."
+    # --- 2. Подмешиваем приоритетные синонимы ---
+    expanded = []
+    for w in base_words:
+        expanded.append(w)
+        if w in priority_synonyms:
+            expanded.extend(priority_synonyms[w])
+    expanded = list(dict.fromkeys(expanded))
+
+    # --- 3. Один промпт к нейросети ---
+    prompt = (
+        f"You are generating stock photo/video metadata keywords.\n"
+        f"Caption: {caption}\n"
+        f"Description: {description}\n\n"
+        f"RULES:\n"
+        f"- Generate up to 100 short keywords (single words or 2-word phrases).\n"
+        f"- Use commercial, visual, and thematic relevance.\n"
+        f"- Avoid duplicates and filler words.\n"
+        f"- No sentences, no reasoning.\n"
+        f"- Output only comma-separated lowercase keywords."
     )
-    raw_themes = call_ollama("gemma2:2b", prompt_themes)
-    themes = [w.strip().lower() for w in raw_themes.split(",") if w.strip()] if raw_themes else []
 
-    # --- 3. синонимы ---
-    prompt_synonyms = (
-        f"Generate synonyms or closely related words for these objects: {', '.join(base_words)}. "
-        f"Only lowercase, comma-separated single words. No sentences."
-    )
-    raw_syn = call_ollama("gemma2:2b", prompt_synonyms)
-    synonyms = [w.strip().lower() for w in raw_syn.split(",") if w.strip()] if raw_syn else []
+    raw = call_ollama("gemma2:2b", prompt)
+    keywords = [w.strip().lower() for w in raw.split(",") if w.strip()] if raw else []
 
-    # --- 4. бизнес-контекст ---
-    prompt_business = (
-        f"List 5–8 relevant industries, businesses, or commercial contexts for these objects: {', '.join(base_words)}. "
-        f"Examples: veterinary, pet care, healthcare, education, IT, marketing. "
-        f"Output lowercase, comma-separated, max 2 words each. No explanations."
-    )
-    raw_business = call_ollama("gemma2:2b", prompt_business)
-    business_words = [w.strip().lower() for w in raw_business.split(",") if w.strip()] if raw_business else []
+    # --- 4. Добавляем наши приоритетные термины ---
+    keywords = expanded + keywords
 
-    # --- 5. объединяем ---
-    keywords = base_words + themes + synonyms + business_words
-
-    # --- 6. фильтрация ---
+    # --- 5. Фильтрация и сортировка по релевантности ---
     banned = {"photo", "image", "stock", "photography", "here", "words", "generated"}
-    keywords = [w for w in keywords if w not in banned and len(w) > 2]
-    keywords = list(dict.fromkeys(keywords))  # уникальные
+    keywords = [k for k in keywords if k not in banned and len(k) > 2]
 
-    # --- 7. добивка до 49 ---
-    if len(keywords) < 49:
-        prompt_fill = (
-            f"Generate {49 - len(keywords)} additional unique related words to these: {', '.join(keywords)}. "
-            f"Lowercase, comma-separated, no sentences, no explanations."
-        )
-        raw_fill = call_ollama("gemma2:2b", prompt_fill)
-        extra = [w.strip().lower() for w in raw_fill.split(",") if w.strip()]
-        keywords.extend(extra)
+    # Удаляем дубли и слишком похожие слова
+    unique = []
+    for k in keywords:
+        if not any(difflib.SequenceMatcher(None, k, u).ratio() > 0.85 for u in unique):
+            unique.append(k)
 
-    keywords = list(dict.fromkeys(keywords))[:49]
-    return keywords
+    # --- 6. Сортировка — более короткие и частотные в начале ---
+    unique.sort(key=lambda x: (len(x), x))
+
+    # --- 7. Ограничение до 49 ключей ---
+    final_keywords = unique[:49]
+
+    return final_keywords
 
 
 def generate_metadata_with_prompt(caption: str, media_type: str = "image", callback=None) -> dict:
